@@ -1,0 +1,48 @@
+Demonstrations of tcpconnlat, the Linux kprobe/ftrace version.
+
+
+This tool traces the kernel function performing active TCP connections
+(eg, via a connect() syscall), and shows the latency (time) for the connection
+as measured locally: the time from SYN sent to the response packet.
+For example:
+
+
+# ./tcpconnlat
+Tracing tcpconnlat ... Hit Ctrl-C to end
+PID      COMM         SADDR                SPORT  DADDR                DPORT  LAT(ms)
+10414    curl         127.0.0.1            52700  127.0.0.1            3333   3.341
+10423    curl         192.168.60.197       48738  220.181.111.188      80     6.553
+10433    wrk          192.168.60.197       55882  220.181.112.244      80     5.935
+10437    http_cli     192.168.60.197       55910  220.181.112.244      80     6.558
+[...]
+
+The first line shows a connection from the "curl" process to the IPv4
+destination address 127.0.0.1, port 3333. This took 3.341 milliseconds: the
+time from the SYN to the response.
+
+TCP connection latency is a useful performance measure showing the time taken
+to establish a connection. This typically involves kernel TCP/IP processing
+and the network round trip time, and not application runtime.
+
+tcpconnlat measures the time from any connection to the response packet, even
+if the response is a RST (port closed).
+
+
+USAGE message:
+
+# ./tcpconnlat -h
+usage: tcpconnlat [-h] [-t] [-p PID] [-m min_ms]
+
+Trace TCP connects and show connection latency
+
+optional arguments:
+  -h    show this help message and exit
+  -t    include timestamp on output
+  -p    trace this PID only
+  -m    minimum duration to trace, in ms (default 0)
+
+examples:
+    ./tcpconnlat           # trace all TCP connect()s
+    ./tcpconnlat -t        # include timestamps
+    ./tcpconnlat -p 121    # only trace PID 121
+    ./tcpconnlat -m 1      # only show connects longer than 1 ms

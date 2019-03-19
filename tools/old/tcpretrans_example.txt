@@ -1,0 +1,103 @@
+Demonstrations of tcpretrans, the Linux kprobe/ftrace version.
+
+
+This tool traces the kernel TCP retransmit function to show details of these
+retransmits. For example:
+
+# ./tcpretrans
+TIME     PID    IP LADDR:LPORT          T> RADDR:RPORT          STATE
+01:55:05 0      4  10.153.223.157:22    R> 69.53.245.40:34619   ESTABLISHED
+01:55:05 0      4  10.153.223.157:22    R> 69.53.245.40:34619   ESTABLISHED
+01:55:17 0      4  10.153.223.157:22    R> 69.53.245.40:22957   ESTABLISHED
+[...]
+
+This output shows three TCP retransmits, the first two were for an IPv4
+connection from 10.153.223.157 port 22 to 69.53.245.40 port 34619. The TCP
+state was "ESTABLISHED" at the time of the retransmit. The on-CPU PID at the
+time of the retransmit is printed, in this case 0 (the kernel, which will
+be the case most of the time).
+
+Retransmits are usually a sign of poor network health, and this tool is
+useful for their investigation. Unlike using tcpdump, this tool has very
+low overhead, as it only traces the retransmit function. It also prints
+additional kernel details: the state of the TCP session at the time of the
+retransmit.
+
+
+A -l option will include TCP tail loss probe attempts:
+
+# ./tcpretrans -l
+Tracing retransmits. Hit Ctrl-C to end
+TIME     PID   LADDR:LPORT          T> RADDR:RPORT         STATE
+01:25:05 0     192.168.60.205:22    L> 192.168.60.1:54165
+01:25:05 0     192.168.60.205:22    R> 192.168.60.1:54165  ESTABLISHED
+01:25:08 4608  192.168.60.205:22    L> 192.168.60.1:54165
+01:25:16 0     192.168.60.205:22    R> 192.168.60.1:54165  ESTABLISHED
+01:25:22 0     192.168.60.205:36762 R> 220.181.112.244:80  SYN_SENT
+01:25:22 0     192.168.60.205:22    R> 192.168.60.1:54165  ESTABLISHED
+01:25:23 0     192.168.60.205:22    L> 192.168.60.1:54165
+[...]
+
+See the "L>" in the "T>" column. These are attempts: the kernel probably
+sent a TLP, but in some cases it might not have been ultimately sent.
+
+To spot heavily retransmitting flows quickly one can use the -c flag (must with duration).
+It will count occurring retransmits per flow.
+
+# ./tcpretrans -c 20
+Tracing retransmits for 20 seconds (buffered)...
+LADDR:LPORT                  RADDR:RPORT              RETRANSMITS
+192.168.60.205:22         <->  192.168.60.1:54165        13
+192.168.60.205:59714      <->  220.181.111.188:80        1
+
+Ending tracing...
+
+This can ease to quickly isolate congested or otherwise awry network paths
+responsible for clamping tcp performance.
+
+Kernel stack traces can be included with -s, which may show the type of
+retransmit:
+
+Tracing retransmits. Hit Ctrl-C to end
+TIME     PID   LADDR:LPORT          T> RADDR:RPORT         STATE
+01:29:21 0     192.168.60.205:36792 R> 220.181.112.244:80  ESTABLISHED
+ => tcp_fastretrans_alert
+ => tcp_ack
+ => tcp_rcv_established
+ => tcp_v4_do_rcv
+ => tcp_v4_rcv
+ => ip_local_deliver_finish
+ => ip_local_deliver
+ => ip_rcv_finish
+ => ip_rcv
+ => __netif_receive_skb
+ => netif_receive_skb
+ => handle_incoming_queue
+ => xennet_poll
+ => net_rx_action
+ => __do_softirq
+ => call_softirq
+ => do_softirq
+ => irq_exit
+ => xen_evtchn_do_upcall
+ => xen_do_hypervisor_callback
+
+This looks like a fast retransmit
+
+USAGE message:
+
+# ./tcpretrans -h
+usage: tcpretrans [-h] [-l] [-c] duration
+
+Trace TCP retransmits
+
+optional arguments:
+  -h          show this help message and exit
+  -l          include tail loss probe attempts
+  -c          count occurred retransmits per flow
+  -s          print stack traces
+  duration    duration seconds, and use buffers
+
+examples:
+    ./tcpretrans           # trace TCP retransmits
+    ./tcpretrans -l        # include TLP attempts

@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+#
+# tcpaccept Trace TCP accept()s.
+#
+# USAGE: tcpaccept [-h] [-t] [-p PID]
+#
+# This uses dynamic tracing of the kernel inet_csk_accept() socket function,
+# and will need to be modified to match kernel changes.
+#
+# 25-Sep-2018   Ethercflow   Created this.
+
+### default variables
+tracing=/sys/kernel/debug/tracing
+flock=/var/tmp/.ftrace-lock
+bufsize_kb=4096
+start_ts=0; opt_duration=0; duration=; opt_pid=0; pid=; ftext= opt_timestamp=0;
+trap ':' INT QUIT TERM PIPE HUP	# sends execution to end tracing section
+
+function usage {
+    cat <<-END >&2
+    USAGE: tcpaccept [-h] [-t] [-p PID]
+                      -h       # help message
+                      -t       # include timestamp on output
+                      -p PID   # trace this PID only
+    eg,
+         ./tcpaccept           # trace all TCP connect()s
+         ./tcpaccpet -t        # include timestamps
+         ./tcpaccept -p 121    # only trace PID 121
+END
+   exit
+}
+
+function warn {
+    if ! eval "$@"; then
+        echo >&2 "WARNING: command failed \"$@\""
+    fi
+}
+
+function end {
+    echo 2>/dev/null
+    echo "Ending tracing..." 2>/dev/null
+    cd $tracing
+    warn "echo 0 > events/tcp/inet_csk_accept_return/enable"
+    if (( opt_pid )); then
+        warn "echo 0 > events/tcp/inet_csk_accept_return/filter"
+    fi
+    warn "echo > trace"
+    (( wroteflock )) && warn "rm $flock"
+}
+
+function die {
+    echo >&2 "$@"
+    exit 1
+}
+
+function edie {
+    # die with a quiet end()
+    echo >&2 "$@"
+    exec >/dev/null 2>&1
+    end
+    exit 1
+}
+
+### process options
+while getopts htp: opt
+do
+    case $opt in
+    t) opt_timestamp=1 ;;
+    p) opt_pid=1; pid=$OPTARG ;;
+    h|?) usage ;;
+    esac
+done
+shift $(( $OPTIND - 1 ))
+if (( $# )); then
+    opt_duration=1
+    duration=$1
+    shift
+fi
+
+### option logic
+(( opt_pid )) && ftext=" issued by PID $pid"
+if (( opt_duration )); then
+    echo "Tracing tcpaccept$ftext for $duration seconds (buffered)..."
+else
+    echo "Tracing tcpaccept$ftext. Hit Ctrl-C to end"
+fi
+
+# select awk
+(( opt_duration )) && use=mawk || use=gawk	# workaround for mawk fflush()
+[[ -x /usr/bin/$use ]] && awk=$use || awk=awk
+wroteflock=1
+
+### check permissions
+cd $tracing || die "ERROR: accessing tracing. Root user? Kernel has FTRACE?
+    debugfs mounted? (mount -t debugfs debugfs /sys/kernel/debug)"
+
+### ftrace lock
+[[ -e $flock ]] && die "ERROR: ftrace may be in use by PID $(cat $flock) $flock"
+echo $$ > $flock || die "ERROR: unable to write $flock."
+
+### setup and begin tracing
+echo nop > current_tracer
+warn "echo $bufsize_kb > buffer_size_kb"
+if (( opt_pid )); then
+    if ! echo "common_pid == $pid" > events/tcp/inet_csk_accept_return/filter; then
+        edie "ERROR: setting -d or -t filter. Exiting."
+    fi
+fi
+if ! echo 1 > events/tcp/inet_csk_accept_return/enable; then
+    edie "ERROR: enabling . Exiting."
+fi
+(( opt_timestamp )) && printf "%-12s " "TIME(s)"
+printf "%-8s %-12s %-20s %-6s %-20s %-6s\n" \
+    "PID" "COMM" "RADDR" "RPORT" "SADDR" "SPORT"
+
+#
+# Determine output format. It may be one of the following (newest first):
+#           TASK-PID   CPU#  ||||    TIMESTAMP  FUNCTION
+#           TASK-PID    CPU#    TIMESTAMP  FUNCTION
+# To differentiate between them, the number of header fields is counted,
+# and an offset set, to skip the extra column when needed.
+#
+offset=$($awk 'BEGIN { o = 0; }
+    $1 == "#" && $2 ~ /TASK/ && NF == 6 { o = 1; }
+    $2 ~ /TASK/ { print o; exit }' trace)
+
+### print trace buffer
+warn "echo > trace"
+( if (( opt_duration )); then
+    # wait then dump buffer
+    sleep $duration
+    cat trace
+else
+    # print buffer live
+    cat trace_pipe
+fi ) | $awk -v o=$offset -v start_ts=$start_ts -v opt_timestamp=$opt_timestamp '
+    # common fields
+    $1 != "#" {
+        # task name can contain dashes
+        comm = pid = $1
+        sub(/-[0-9][0-9]*/, "", comm)
+        sub(/.*-/, "", pid)
+        time = $(3+o); sub(":", "", time)
+    }
+
+    # inet_csk_accept_return
+    $1 != "#" && $0 ~ /inet_csk_accept_return/ {
+        saddr = $(7+o); sub(/.*=/, "", saddr)
+        sport = $(5+o); sub(/.*=/, "", sport)
+        raddr = $(8+o); sub(/.*=/, "", raddr)
+        rport = $(6+o); sub(/.*=/, "", rport)
+
+        if (opt_timestamp) {
+            if (start_ts == 0)
+                start_ts = time
+            lasted_s = time - start_ts
+            printf "%-12.6f ", lasted_s
+        }
+
+        printf "%-8s %-12s %-20s %-6s %-20s %-6s\n",
+               pid, comm, raddr, rport, saddr, sport
+
+    if (!opt_duration)
+        fflush()
+
+        next
+    }
+
+    $0 ~ /LOST.*EVENTS/ { print "WARNING: " $0 > "/dev/stderr" }
+'
+
+### end tracing
+end

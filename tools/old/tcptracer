@@ -1,0 +1,312 @@
+#!/usr/bin/env bash
+#
+# tcpv4tracer   Trace TCP connections.
+#
+# USAGE: tcptracer [-h] [-v] [-p PID] [-N NETNS]
+#
+# You should generally try to avoid writing long scripts that measure multiple
+# functions and walk multiple kernel structures, as they will be a burden to
+# maintain as the kernel changes.
+# The following code should be replaced, and simplified, when static TCP probes
+# exist.
+#
+# 26-Sep-2018   Ethercflow   Created this.
+
+### default variables
+tracing=/sys/kernel/debug/tracing
+flock=/var/tmp/.ftrace-lock
+bufsize_kb=4096
+start_ts=0; opt_duration=0; duration=; opt_timestamp=0;
+trap ':' INT QUIT TERM PIPE HUP	# sends execution to end tracing section
+
+function usage {
+    cat <<-END >&2
+    USAGE: tcptracer [-ht]
+                      -h          # help message
+                      -t          # include timestamp on output (seconds)
+    eg,
+         ./tcptracer              # trace all TCP state changes
+         ./tcptracer -t           # include timestamp column
+END
+    exit
+}
+
+function warn {
+    if ! eval "$@"; then
+        echo >&2 "WARNING: command failed \"$@\""
+    fi
+}
+
+function end {
+    echo 2>/dev/null
+    echo "Ending tracing..." 2>/dev/null
+    cd $tracing
+    warn "echo 0 > events/tcp/tcp_v4_connect_entry/enable"
+    warn "echo 0 > events/tcp/tcp_v4_connect_return/enable"
+    warn "echo 0 > events/tcp/tcp_set_state/enable"
+    warn "echo 0 > events/tcp/tcp_close/enable"
+    warn "echo 0 > events/tcp/inet_csk_accept_return/enable"
+    warn "echo > trace"
+    (( wroteflock )) && warn "rm $flock"
+}
+
+function die {
+    echo >&2 "$@"
+    exit 1
+}
+
+function edie {
+    # die with a quiet end()
+    echo >&2 "$@"
+    exec >/dev/null 2>&1
+    end
+    exit 1
+}
+
+### process options
+while getopts hTt opt
+do
+    case $opt in
+    T) opt_time=1 ;;
+    t) opt_timestamp=1 ;;
+    h|?) usage ;;
+    esac
+done
+shift $(( $OPTIND - 1 ))
+if (( $# )); then
+    opt_duration=1
+    duration=$1
+    shift
+fi
+
+### option logic
+if (( opt_duration )); then
+    echo "Tracing TCP established connections for $duration seconds (buffered)..."
+else
+    echo "Tracing TCP established connections. Hit Ctrl-C to end"
+fi
+
+# select awk
+(( opt_duration )) && use=mawk || use=gawk	# workaround for mawk fflush()
+[[ -x /usr/bin/$use ]] && awk=$use || awk=awk
+wroteflock=1
+
+### check permissions
+cd $tracing || die "ERROR: accessing tracing. Root user? Kernel has FTRACE?
+    debugfs mounted? (mount -t debugfs debugfs /sys/kernel/debug)"
+
+### ftrace lock
+[[ -e $flock ]] && die "ERROR: ftrace may be in use by PID $(cat $flock) $flock"
+echo $$ > $flock || die "ERROR: unable to write $flock."
+
+### setup and begin tracing
+echo nop > current_tracer
+warn "echo $bufsize_kb > buffer_size_kb"
+if ! echo 1 > events/tcp/tcp_set_state/enable; then
+    edie "ERROR: enabling tcp_set_state tracepoint. Exiting."
+fi
+if ! echo 1 > events/tcp/tcp_v4_connect_entry/enable; then
+    edie "ERROR: enabling tcp_v4_connect_entry tracepoint. Exiting."
+fi
+if ! echo 1 > events/tcp/tcp_v4_connect_return/enable; then
+    edie "ERROR: enabling tcp_v4_connect_return tracepoint. Exiting."
+fi
+if ! echo 1 > events/tcp/tcp_set_state/enable; then
+    edie "ERROR: enabling tcp_set_state tracepoint. Exiting."
+fi
+if ! echo 1 > events/tcp/tcp_close/enable; then
+    edie "ERROR: enabling tcp_close tracepoint. Exiting."
+fi
+if ! echo 1 > events/tcp/inet_csk_accept_return/enable; then
+    edie "ERROR: enabling inet_csk_accept_return tracepoint. Exiting."
+fi
+
+(( opt_timestamp )) && printf "%-12s " "TIME(s)"
+printf "%-s %-8s %-12s %-20s %-20s %-6s %-6s\n" \
+    "T" "PID" "COMM" "SADDR" "DADDR" "SPORT" "DPORT"
+
+#
+# Determine output format. It may be one of the following (newest first):
+#           TASK-PID   CPU#  ||||    TIMESTAMP  FUNCTION
+#           TASK-PID    CPU#    TIMESTAMP  FUNCTION
+# To differentiate between them, the number of header fields is counted,
+# and an offset set, to skip the extra column when needed.
+#
+offset=$($awk 'BEGIN { o = 0; }
+    $1 == "#" && $2 ~ /TASK/ && NF == 6 { o = 1; }
+    $2 ~ /TASK/ { print o; exit }' trace)
+
+### print trace buffer
+warn "echo > trace"
+( if (( opt_duration )); then
+    # wait then dump buffer
+    sleep $duration
+    cat trace
+else
+    # print buffer live
+    cat trace_pipe
+fi ) | $awk -v o=$offset -v start_ts=$start_ts -v opt_time=$opt_time -v opt_timestamp=$opt_timestamp '
+    BEGIN {
+        m[1] = "TCP_ESTABLISHED"
+        m[2] = "TCP_SYN_SENT"
+        m[3] = "TCP_SYN_RECV"
+        m[4] = "TCP_FIN_WAIT1"
+        m[5] = "TCP_FIN_WAIT2"
+        m[6] = "TCP_TIME_WAIT"
+        m[7] = "TCP_CLOSE"
+        m[8] = "TCP_CLOSE_WAIT"
+        m[9] = "TCP_LAST_ACK"
+        m[10] = "TCP_LISTEN"
+
+        TCP_ESTABLISHED = 1
+        TCP_SYN_SENT = 2
+        TCP_SYN_RECV = 3
+        TCP_FIN_WAIT1 = 4
+        TCP_FIN_WAIT2 = 5
+        TCP_TIME_WAIT = 6
+        TCP_CLOSE = 7
+        TCP_CLOSE_WAIT = 8
+        TCP_LAST_ACK = 9
+        TCP_LISTEN = 10
+    }
+
+    # common fields
+    $1 != "#" {
+        comm = pid = $1
+        sub(/-[0-9][0-9]*/, "", comm)
+        sub(/.*-/, "", pid)
+        time = $(3+o); sub(":", "", time)
+    }
+
+    # tcp_v4_connect_entry
+    $1 != "#" && $0 ~ /tcp_v4_connect_entry/ {
+        skaddr = $(5+o); sub(/.*=/, "", skaddr)
+        connectsock[pid] = skaddr
+        next
+    }
+
+    # tcp_v4_connect_return
+    $1 != "#" && $0 ~ /tcp_v4_connect_return/ {
+        if (!(pid in connectsock))
+            next
+
+        delete connectsock[pid]
+
+        ret = $(12+o); sub(/.*=/, "", ret)
+        if (ret != 0)
+            next
+
+        saddr = $(8+o); sub(/.*=/, "", saddr)
+        sport = $(6+o); sub(/.*=/, "", sport)
+        daddr = $(9+o); sub(/.*=/, "", daddr)
+        dport = $(7+o); sub(/.*=/, "", dport)
+
+        if (saddr == 0 || daddr == 0 || sport == 0 || dport == 0)
+            next
+
+        tuplepid_ipv4_p[saddr, addr, sport, dport] = pid
+        tuplepid_ipv4_c[saddr, addr, sport, dport] = comm
+    }
+
+    # tcp_set_state
+    $1 != "#" && $0 ~ /tcp_set_state/ {
+        nstate = $(13+o); sub(/.*=/, "", nstate)
+        if (nstate != TCP_ESTABLISHED && nstate != TCP_CLOSE)
+            next
+
+        saddr = $(8+o); sub(/.*=/, "", saddr)
+        sport = $(6+o); sub(/.*=/, "", sport)
+        daddr = $(9+o); sub(/.*=/, "", daddr)
+        dport = $(7+o); sub(/.*=/, "", dport)
+
+        if (saddr == 0 || daddr == 0 || sport == 0 || dport == 0)
+            next
+
+        if (nstate == TCP_CLOSE) {
+            delete tuplepid_ipv4_p[saddr, addr, sport, dport]
+            delete tuplepid_ipv4_c[saddr, addr, sport, dport]
+            next
+        }
+
+        c_pid = tuplepid_ipv4_p[saddr, addr, sport, dport]
+        if (c_pid == 0)
+            next
+
+        if (opt_timestamp) {
+            if (start_ts == 0)
+                start_ts = time
+            lasted_s = time - start_ts
+            printf "%-12.6f ", lasted_s
+        }
+
+        c_comm = tuplepid_ipv4_c[saddr, addr, sport, dport]
+
+        printf "%-s %-8s %-12s %-20s %-20s %-6s %-6s\n",
+            "C", c_pid, c_comm, saddr, daddr, sport, dport
+
+        if (!opt_duration)
+            fflush()
+
+        delete tuplepid_ipv4_p[saddr, addr, sport, dport]
+        delete tuplepid_ipv4_c[saddr, addr, sport, dport]
+
+        next
+    }
+
+    # tcp_close
+    $1 != "#" && $0 ~ /tcp_close/ {
+        oldstate = $(12+o); sub(/.*=/, "", oldstate)
+        if (oldstate == TCP_SYN_SENT ||
+            oldstate == TCP_SYN_RECV ||
+            oldstate == TCP_NEW_SYN_RECV)
+            next
+
+        saddr = $(8+o); sub(/.*=/, "", saddr)
+        sport = $(6+o); sub(/.*=/, "", sport)
+        daddr = $(9+o); sub(/.*=/, "", daddr)
+        dport = $(7+o); sub(/.*=/, "", dport)
+
+        if (opt_timestamp) {
+            if (start_ts == 0)
+                start_ts = time
+            lasted_s = time - start_ts
+            printf "%-12.6f ", lasted_s
+        }
+
+        printf "%-s %-8s %-12s %-20s %-20s %-6s %-6s\n",
+            "X", pid, comm, saddr, daddr, sport, dport
+
+        if (!opt_duration)
+            fflush()
+
+        next
+    }
+
+    # tcp_inet_csk_accept_return
+    $1 != "#" && $0 ~ /inet_csk_accept_return/ {
+        saddr = $(7+o); sub(/.*=/, "", saddr)
+        sport = $(5+o); sub(/.*=/, "", sport)
+        raddr = $(8+o); sub(/.*=/, "", raddr)
+        rport = $(6+o); sub(/.*=/, "", rport)
+
+        if (opt_timestamp) {
+            if (start_ts == 0)
+                start_ts = time
+            lasted_s = time - start_ts
+            printf "%-12.6f ", lasted_s
+        }
+
+        printf "%-s %-8s %-12s %-20s %-20s %-6s %-6s\n",
+            "A", pid, comm, saddr, daddr, sport, dport
+
+        if (!opt_duration)
+            fflush()
+
+        next
+    }
+
+    $0 ~ /LOST.*EVENTS/ { print "WARNING: " $0 > "/dev/stderr" }
+'
+
+### end tracing
+end

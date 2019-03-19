@@ -1,0 +1,47 @@
+Demonstrations of tcpstates, the Linux kprobe/ftrace version.
+
+
+tcpstates prints TCP state change information, including the duration in each
+state as milliseconds. For example, a single TCP session:
+
+# ./tcpstates
+Tracing tcpstates ... Hit Ctrl-C to end
+SKADDR               C-PID    C-COMM       LADDR                LPORT  RADDR                RPORT  OLDSTATE       ->  NEWSTATE       MS
+ffff88003d8c2280     18489    curl         192.168.60.205       0      180.149.132.151      80     CLOSE          ->  SYN_SENT       0.000
+ffff88003d8c2280     0        <idle>       192.168.60.205       54150  180.149.132.151      80     SYN_SENT       ->  ESTABLISHED    6.797
+ffff88003d8c2280     0        <idle>       192.168.60.205       54150  180.149.132.151      80     ESTABLISHED    ->  CLOSE_WAIT     10.505
+ffff88003d8c2280     18489    curl         192.168.60.205       54150  180.149.132.151      80     CLOSE_WAIT     ->  LAST_ACK       0.870
+ffff88003d8c2280     4646     main         192.168.60.205       54150  180.149.132.151      80     LAST_ACK       ->  CLOSE          0.549
+ffff88003cb84500     18492    curl         192.168.60.205       0      180.149.131.98       80     CLOSE          ->  SYN_SENT       4418.078
+ffff88003cb84500     24       ksoftirqd/3  192.168.60.205       34144  180.149.131.98       80     SYN_SENT       ->  ESTABLISHED    6.193
+ffff88003cb84500     0        <idle>       192.168.60.205       34144  180.149.131.98       80     ESTABLISHED    ->  CLOSE_WAIT     9.878
+ffff88003cb84500     18492    curl         192.168.60.205       34144  180.149.131.98       80     CLOSE_WAIT     ->  LAST_ACK       0.572
+ffff88003cb84500     18492    curl         192.168.60.205       34144  180.149.131.98       80     LAST_ACK       ->  CLOSE          0.456
+[...]
+
+This showed that the most time was spent in the CLOSE state (which then
+transitioned to SYN_SENT), which was 4418.078 milliseconds.
+
+The first column is the socked address, as the output may include lines from
+different sessions interleaved. The next two columns show the current on-CPU
+process ID and command name: these may show the process that owns the TCP
+session, depending on whether the state change executes synchronously in
+process context. If that's not the case, they may show kernel details.
+
+
+USAGE:
+
+# tcpstates -h
+usage: tcpstates [-h] [-T] [-t]
+
+Trace TCP session state changes and durations
+
+optional arguments:
+  -h    show this help message and exit
+  -T    include time column on output (HH:MM:SS)
+  -t    include timestamp on output (seconds)
+
+examples:
+    ./tcpstates           # trace all TCP state changes
+    ./tcpstates -t        # include timestamp column
+    ./tcpstates -T        # include time column (HH:MM:SS)

@@ -1,0 +1,34 @@
+Demonstrations of tcptracer, the Linux kprobe/ftrace version.
+
+
+This tool traces the kernel function performing TCP connections (eg, via a
+connect() or accept() syscalls) and closing them (explicitly or if the process
+dies). Some example output (IP addresses are fake):
+
+```
+# ./tcptracer
+Tracing tcptrace TCP established connections. Hit Ctrl-C to end
+T PID      COMM         SADDR                DADDR                SPORT  DPORT
+C 13376    curl         192.168.60.205       220.181.111.188      59670  80
+X 13376    curl         192.168.60.205       220.181.111.188      59670  80
+C 13380    curl         127.0.0.1            127.0.0.1            59410  3333
+A 4608     wrk          127.0.0.1            127.0.0.1            3333   59410
+X 13380    curl         127.0.0.1            127.0.0.1            59410  3333
+```
+
+The output details show the kind of event (C for connection, X for close and A
+for accept), PID, IP version, source address, destination address,
+source port and destination port.
+
+The -t option prints a timestamp column:
+
+```
+# ./tcptracer -t
+Tracing TCP established connections. Hit Ctrl-C to end
+TIME(s)      T PID      COMM         SADDR                DADDR                SPORT  DPORT
+0.000000     C 13465    curl         127.0.0.1            127.0.0.1            59412  3333
+0.000630     A 4646     wrk          127.0.0.1            127.0.0.1            3333   59412
+3.112279     X 13465    curl         127.0.0.1            127.0.0.1            59412  3333
+4.611664     C 13466    curl         127.0.0.1            127.0.0.1            59414  3333
+4.612505     A 4646     wrk          127.0.0.1            127.0.0.1            3333   59414
+```

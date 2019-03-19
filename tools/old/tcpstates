@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+#
+# tcpstates   Trace the TCP session state changes with durations.
+#
+# USAGE: tcpstates [-h] [-C] [-S] [interval [count]]
+#
+# This uses the tcp:tcp_set_state tracepoint.
+#
+# 21-Sep-2018   Ethercflow   Created this.
+
+### default variables
+tracing=/sys/kernel/debug/tracing
+flock=/var/tmp/.ftrace-lock
+bufsize_kb=4096
+start_ts=0; opt_duration=0; duration=; opt_time=0; opt_timestamp=0;
+trap ':' INT QUIT TERM PIPE HUP	# sends execution to end tracing section
+
+function usage {
+    cat <<-END >&2
+    USAGE: tcpstates [-hTt]
+                      -h          # help message
+                      -T          # include time column on output (HH:MM:SS)
+                      -t          # include timestamp on output (seconds)
+    eg,
+         ./tcpstates              # trace all TCP state changes
+         ./tcpstates -t           # include timestamp column
+         ./tcpstates -T           # include time column (HH:MM:SS)
+END
+    exit
+}
+
+function warn {
+    if ! eval "$@"; then
+        echo >&2 "WARNING: command failed \"$@\""
+    fi
+}
+
+function end {
+    echo 2>/dev/null
+    echo "Ending tracing..." 2>/dev/null
+    cd $tracing
+    warn "echo 0 > events/tcp/tcp_set_state/enable"
+    warn "echo > trace"
+    (( wroteflock )) && warn "rm $flock"
+}
+
+function die {
+    echo >&2 "$@"
+    exit 1
+}
+
+function edie {
+    # die with a quiet end()
+    echo >&2 "$@"
+    exec >/dev/null 2>&1
+    end
+    exit 1
+}
+
+### process options
+while getopts hTt opt
+do
+    case $opt in
+    T) opt_time=1 ;;
+    t) opt_timestamp=1 ;;
+    h|?) usage ;;
+    esac
+done
+shift $(( $OPTIND - 1 ))
+if (( $# )); then
+    opt_duration=1
+    duration=$1
+    shift
+fi
+
+### option logic
+if (( opt_duration )); then
+    echo "Tracing tcpstates for $duration seconds (buffered)..."
+else
+    echo "Tracing tcpstates ... Hit Ctrl-C to end"
+fi
+
+# select awk
+(( opt_duration )) && use=mawk || use=gawk	# workaround for mawk fflush()
+[[ -x /usr/bin/$use ]] && awk=$use || awk=awk
+wroteflock=1
+
+### check permissions
+cd $tracing || die "ERROR: accessing tracing. Root user? Kernel has FTRACE?
+    debugfs mounted? (mount -t debugfs debugfs /sys/kernel/debug)"
+
+### ftrace lock
+[[ -e $flock ]] && die "ERROR: ftrace may be in use by PID $(cat $flock) $flock"
+echo $$ > $flock || die "ERROR: unable to write $flock."
+
+### setup and begin tracing
+echo nop > current_tracer
+warn "echo $bufsize_kb > buffer_size_kb"
+if ! echo 1 > events/tcp/tcp_set_state/enable; then
+    edie "ERROR: enabling . Exiting."
+fi
+
+(( opt_time )) && printf "%-8s " "TIME"
+(( opt_timestamp )) && printf "%-8s " "TIME(s)"
+printf "%-20s " "SKADDR"
+printf "%-8s " "C-PID"
+printf "%-12s " "C-COMM"
+printf "%-20s " "LADDR"
+printf "%-6s " "LPORT"
+printf "%-20s " "RADDR"
+printf "%-6s " "RPORT"
+printf "%-18s " "OLDSTATE"
+printf "%-4s" "->"
+printf "%-18s " "NEWSTATE"
+printf "%-5s\n" "MS"
+
+#
+# Determine output format. It may be one of the following (newest first):
+#           TASK-PID   CPU#  ||||    TIMESTAMP  FUNCTION
+#           TASK-PID    CPU#    TIMESTAMP  FUNCTION
+# To differentiate between them, the number of header fields is counted,
+# and an offset set, to skip the extra column when needed.
+#
+offset=$($awk 'BEGIN { o = 0; }
+    $1 == "#" && $2 ~ /TASK/ && NF == 6 { o = 1; }
+    $2 ~ /TASK/ { print o; exit }' trace)
+
+### print trace buffer
+warn "echo > trace"
+( if (( opt_duration )); then
+    # wait then dump buffer
+    sleep $duration
+    cat trace
+else
+    # print buffer live
+    cat trace_pipe
+fi ) | $awk -v o=$offset -v start_ts=$start_ts -v opt_time=$opt_time -v opt_timestamp=$opt_timestamp '
+    BEGIN {
+        m[1]="ESTABLISHED";
+        m[2]="SYN_SENT";
+        m[3]="SYN_RECV";
+        m[4]="FIN_WAIT1";
+        m[5]="FIN_WAIT2";
+        m[6]="TIME_WAIT";
+        m[7]="CLOSE";
+        m[8]="CLOSE_WAIT";
+        m[9]="LAST_ACK";
+        m[10]="LISTEN";
+    }
+
+    $1 != "#" {
+        comm = pid = $1
+        sub(/-[0-9][0-9]*/, "", comm)
+        sub(/.*-/, "", pid)
+        time = $(3+o); sub(":", "", time)
+
+        skaddr = $(5+o); sub(/.*=/, "", skaddr)
+        laddr = $(8+o); sub(/.*=/, "", laddr)
+        lport = $(6+o); sub(/.*=/, "", lport)
+        raddr = $(9+o); sub(/.*=/, "", raddr)
+        rport = $(7+o); sub(/.*=/, "", rport)
+        ostate = $(12+o); sub(/.*=/, "", ostate)
+        nstate = $(13+o); sub(/.*=/, "", nstate)
+
+        span_ms = 0
+        tsp = last[sk]
+        if (tsp > 0)
+           span_ms = (time - tsp) * 1000
+        last[sk] = time
+
+        if (opt_time)
+           printf "%-8s ", strftime("%H:%M:%S", time)
+
+        if (opt_timestamp) {
+            if (start_ts == 0)
+                start_ts = time
+            lasted_s = time - start_ts
+            printf "%-8.6f ", lasted_s
+        }
+
+        printf "%-20s ", skaddr
+        printf "%-8s %-12s ", pid, comm
+        printf "%-20s ", laddr
+        printf "%-6s ", lport
+        printf "%-20s ", raddr
+        printf "%-6s ", rport
+        printf "%-18s ", m[ostate]
+        printf "%-4s", "->"
+        printf "%-18s ", m[nstate]
+        printf "%-5.3f\n", span_ms
+
+        next
+    }
+
+    $0 ~ /LOST.*EVENTS/ { print "WARNING: " $0 > "/dev/stderr" }
+'
+
+### end tracing
+end
