@@ -1,0 +1,68 @@
+Demonstrations of tcplife, the Linux kprobe/ftrace version.
+
+
+tcplife summarizes TCP sessions that open and close while tracing. For example:
+
+# ./tcplife
+Tracing tcplife ... Hit Ctrl-C to end
+PID      COMM         LADDR                LPORT  RADDR                RPORT   TX_KB  RX_KB MS
+15958    wrk          192.168.60.205       36814  220.181.112.244      80          4   1518 3189.6
+15962    wrk          192.168.60.205       59754  220.181.111.188      80         27   9809 24574.8
+[...]
+
+This caught a couple of "wrk" sessions were traced, connecting to port 80, and lasting 3189.6 and 24574.8
+milliseconds.
+
+This tool is useful for workload characterisation and flow accounting:
+identifying what connections are happening, with the bytes transferred.
+
+In this example, I uploaded a 10 Mbyte file to the server, and then downloaded
+it again, using scp:
+
+# ./tcplife
+PID   COMM       LADDR           LPORT RADDR           RPORT TX_KB RX_KB MS
+7715  curl       127.0.0.1       50894 127.0.0.1       28527     0     0 0.25
+3277  curl       127.0.0.1       28527 127.0.0.1       50894     0     0 0.30
+7619  sshd       192.168.60.205  22    192.168.60.220  33043     5 10255 4716.8
+7798  sshd       192.168.60.205  22    192.168.60.220  44955 10265     6 3276.1
+[...]
+
+You can see the 10 Mbytes received by sshd, and then later transmitted. Looks
+like receive was slower (4.72 seconds) than transmit (3.28 seconds).
+
+
+Timestamps can be added with -t:
+
+# ./tcplife -t
+TIME(s)   PID   COMM       LADDR           LPORT RADDR           RPORT TX_KB RX_KB MS
+0.000000  5973  recordProg 127.0.0.1       47986 127.0.0.1       28527     0     0 0.25
+0.000059  3277  redis-serv 127.0.0.1       28527 127.0.0.1       47986     0     0 0.29
+1.022454  5996  recordProg 127.0.0.1       47988 127.0.0.1       28527     0     0 0.23
+1.022513  3277  redis-serv 127.0.0.1       28527 127.0.0.1       47988     0     0 0.27
+2.044868  6019  recordProg 127.0.0.1       47990 127.0.0.1       28527     0     0 0.24
+2.044924  3277  redis-serv 127.0.0.1       28527 127.0.0.1       47990     0     0 0.28
+3.069136  6042  recordProg 127.0.0.1       47992 127.0.0.1       28527     0     0 0.22
+3.069204  3277  redis-serv 127.0.0.1       28527 127.0.0.1       47992     0     0 0.28
+
+This shows that the recordProg process was connecting once per second.
+
+There's also a -T for HH:MM:SS formatted times.
+
+USAGE:
+
+# ./tcplife.py -h
+usage: tcplife.py [-h] [-T] [-t] [-p PID]
+
+Trace the lifespan of TCP sessions and summarize
+
+optional arguments:
+  -h     show this help message and exit
+  -T     include time column on output (HH:MM:SS)
+  -t     include timestamp on output (seconds)
+  -p     trace this PID only
+
+examples:
+    ./tcplife           # trace all TCP connect()s
+    ./tcplife -t        # include time column (HH:MM:SS)
+    ./tcplife -tT       # with times & timestamps
+    ./tcplife -p 121    # only trace PID 181

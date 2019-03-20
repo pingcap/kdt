@@ -1,0 +1,52 @@
+Demonstrations of tcpaccept, the Linux kprobe/ftrace version.
+
+
+This tool traces the kernel function accepting TCP socket connections (eg, a
+passive connection via accept(); not connect()). Some example output (IP
+addresses changed to protect the innocent):
+
+# ./tcpaccept
+Tracing tcpaccept ... Hit Ctrl-C to end
+PID      COMM         RADDR                RPORT  SADDR                SPORT
+1463     sshd         192.168.60.1         65339  192.168.60.170       22
+1463     sshd         192.168.60.1         65341  192.168.60.170       22
+30891    iperf3       192.168.60.1         49158  192.168.60.170       5201
+
+This output shows three connections, two IPv4 connections to PID 1463, an "sshd"
+process listening on port 22, and one IPv4 connection to a "iperf3" process
+listening on port 5201.
+
+The overhead of this tool should be negligible, since it is only tracing the
+kernel function performing accept. It is not tracing every packet and then
+filtering.
+
+This tool only traces successful TCP accept()s. Connection attempts to closed
+ports will not be shown (those can be traced via other functions).
+
+
+The -t option prints a timestamp column:
+
+# ./tcpaccept -t
+Tracing tcpaccept ... Hit Ctrl-C to end
+TIME(s)      PID      COMM         RADDR                RPORT  SADDR                SPORT
+0.000000     1463     sshd         192.168.60.1         49385  192.168.60.170       22
+2.404860     1463     sshd         192.168.60.1         49386  192.168.60.170       22
+5.906867     30891    iperf3       192.168.60.1         49387  192.168.60.170       5201
+5.952513     30891    iperf3       192.168.60.1         49388  192.168.60.170       5201
+
+USAGE message:
+
+# ./tcpaccept -h
+usage: tcpaccept [-h] [-t] [-p PID]
+
+Trace TCP accepts
+
+optional arguments:
+  -h    show this help message and exit
+  -t    include timestamp on output
+  -p    trace this PID only
+
+examples:
+    ./tcpaccept           # trace all TCP accept()s
+    ./tcpaccept -t        # include timestamps
+    ./tcpaccept -p 121    # only trace PID 121

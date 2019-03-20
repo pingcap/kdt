@@ -1,0 +1,34 @@
+commit ee60ad219f5c7c4fb2f047f88037770063ef785f
+Author: Xin Long <lucien.xin@gmail.com>
+Date:   Fri Mar 8 14:50:54 2019 +0800
+
+    route: set the deleted fnhe fnhe_daddr to 0 in ip_del_fnhe to fix a race
+
+    The race occurs in __mkroute_output() when 2 threads lookup a dst:
+
+      CPU A                 CPU B
+      find_exception()
+                            find_exception() [fnhe expires]
+                            ip_del_fnhe() [fnhe is deleted]
+      rt_bind_exception()
+
+    In rt_bind_exception() it will bind a deleted fnhe with the new dst, and
+    this dst will get no chance to be freed. It causes a dev defcnt leak and
+    consecutive dmesg warnings:
+
+      unregister_netdevice: waiting for ethX to become free. Usage count = 1
+
+    Especially thanks Jon to identify the issue.
+
+    This patch fixes it by setting fnhe_daddr to 0 in ip_del_fnhe() to stop
+    binding the deleted fnhe with a new dst when checking fnhe's fnhe_daddr
+    and daddr in rt_bind_exception().
+
+    It works as both ip_del_fnhe() and rt_bind_exception() are protected by
+    fnhe_lock and the fhne is freed by kfree_rcu().
+
+    Fixes: deed49df7390 ("route: check and remove route cache when we get route")
+    Signed-off-by: Jon Maxwell <jmaxwell37@gmail.com>
+    Signed-off-by: Xin Long <lucien.xin@gmail.com>
+    Reviewed-by: David Ahern <dsahern@gmail.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>

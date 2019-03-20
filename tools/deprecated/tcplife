@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+#
+# tcplife   Trace the lifespan of TCP sessions and summarize.
+#
+# USAGE: tcplife [-h] [-C] [-S] [-p PID] [interval [count]]
+#
+# This uses the tcp:tcp_set_state tracepoint.
+#
+# While throughput counters are emitted, they are fetched in a low-overhead
+# manner: reading members of the tcp_info struct on TCP close. ie, we do not
+# trace send/receive.
+#
+# 25-Sep-2018   Ethercflow   Created this.
+
+### default variables
+tracing=/sys/kernel/debug/tracing
+flock=/var/tmp/.ftrace-lock
+bufsize_kb=4096
+start_ts=0; opt_duration=0; duration=; opt_time=0; opt_timestamp=0; opt_pid=0; pid=; ftext=
+trap ':' INT QUIT TERM PIPE HUP	# sends execution to end tracing section
+
+function usage {
+    cat <<-END >&2
+    USAGE: tcplife [-hTt]
+                    -h          # help message
+                    -T          # include time column on output (HH:MM:SS)
+                    -t          # include timestamp on output (seconds)
+    eg,
+         ./tcplife              # trace all TCP state changes
+         ./tcplife -t           # include timestamp column
+         ./tcplife -T           # include time column (HH:MM:SS)
+END
+    exit
+}
+
+function warn {
+    if ! eval "$@"; then
+        echo >&2 "WARNING: command failed \"$@\""
+    fi
+}
+
+function end {
+    echo 2>/dev/null
+    echo "Ending tracing..." 2>/dev/null
+    cd $tracing
+    warn "echo 0 > events/tcp/tcp_set_state/enable"
+    if (( opt_pid )); then
+        warn "echo 0 > events/tcp/tcp_set_state/filter"
+    fi
+    warn "echo > trace"
+    (( wroteflock )) && warn "rm $flock"
+}
+
+function die {
+    echo >&2 "$@"
+    exit 1
+}
+
+function edie {
+    # die with a quiet end()
+    echo >&2 "$@"
+    exec >/dev/null 2>&1
+    end
+    exit 1
+}
+
+### process options
+while getopts hTtp: opt
+do
+    case $opt in
+    T) opt_time=1 ;;
+    t) opt_timestamp=1 ;;
+    p) opt_pid=1; pid=$OPTARG ;;
+    h|?) usage ;;
+    esac
+done
+shift $(( $OPTIND - 1 ))
+if (( $# )); then
+    opt_duration=1
+    duration=$1
+    shift
+fi
+
+### option logic
+(( opt_pid )) && ftext=" issued by PID $pid"
+if (( opt_duration )); then
+    echo "Tracing tcplife$ftext for $duration seconds (buffered)..."
+else
+    echo "Tracing tcplife$ftext. Hit Ctrl-C to end"
+fi
+
+# select awk
+(( opt_duration )) && use=mawk || use=gawk	# workaround for mawk fflush()
+[[ -x /usr/bin/$use ]] && awk=$use || awk=awk
+wroteflock=1
+
+### check permissions
+cd $tracing || die "ERROR: accessing tracing. Root user? Kernel has FTRACE?
+    debugfs mounted? (mount -t debugfs debugfs /sys/kernel/debug)"
+
+### ftrace lock
+[[ -e $flock ]] && die "ERROR: ftrace may be in use by PID $(cat $flock) $flock"
+echo $$ > $flock || die "ERROR: unable to write $flock."
+
+### setup and begin tracing
+echo nop > current_tracer
+warn "echo $bufsize_kb > buffer_size_kb"
+if (( opt_pid )); then
+    if ! echo "common_pid==$pid" > events/tcp/tcp_set_state/filter; then
+        edie "ERROR: setting -d or -t filter. Exiting."
+    fi
+fi
+if ! echo 1 > events/tcp/tcp_set_state/enable; then
+    edie "ERROR: enabling . Exiting."
+fi
+
+(( opt_time )) && printf "%-8s " "TIME"
+(( opt_timestamp )) && printf "%-12s " "TIME(s)"
+printf "%-8s %-12s %-20s %-6s %-20s %-6s %6s %6s %-5s\n" \
+    "PID" "COMM" "LADDR" "LPORT" "RADDR" "RPORT" "TX_KB" "RX_KB" "MS"
+
+#
+# Determine output format. It may be one of the following (newest first):
+#           TASK-PID   CPU#  ||||    TIMESTAMP  FUNCTION
+#           TASK-PID    CPU#    TIMESTAMP  FUNCTION
+# To differentiate between them, the number of header fields is counted,
+# and an offset set, to skip the extra column when needed.
+#
+offset=$($awk 'BEGIN { o = 0; }
+    $1 == "#" && $2 ~ /TASK/ && NF == 6 { o = 1; }
+    $2 ~ /TASK/ { print o; exit }' trace)
+
+### print trace buffer
+warn "echo > trace"
+( if (( opt_duration )); then
+    # wait then dump buffer
+    sleep $duration
+    cat trace
+else
+    # print buffer live
+    cat trace_pipe
+fi ) | $awk -v o=$offset -v start_ts=$start_ts -v opt_time=$opt_time -v opt_timestamp=$opt_timestamp '
+    BEGIN {
+        TCP_ESTABLISHED = 1
+        TCP_SYN_SENT = 2
+        TCP_SYN_RECV = 3
+        TCP_FIN_WAIT1 = 4
+        TCP_FIN_WAIT2 = 5
+        TCP_TIME_WAIT = 6
+        TCP_CLOSE = 7
+        TCP_CLOSE_WAIT = 8
+        TCP_LAST_ACK = 9
+        TCP_LISTEN = 10
+    }
+
+    # common fields
+    $1 != "#" {
+        comm = pid = $1
+        sub(/-[0-9][0-9]*/, "", comm)
+        sub(/.*-/, "", pid)
+        time = $(3+o); sub(":", "", time)
+    }
+
+    # tcp_set_state
+    $1 != "#" && $0 ~ /tcp_set_state/ {
+        skaddr = $(5+o); sub(/.*=/, "", skaddr)
+        nstate = $(13+o); sub(/.*=/, "", nstate)
+
+        if (nstate < TCP_FIN_WAIT1)
+            birth[skaddr] = time
+
+        if (nstate == TCP_SYN_SENT || nstate == TCP_LAST_ACK) {
+            whoami_p[skaddr] = pid
+            whoami_c[skaddr] = comm
+        }
+
+        if (nstate != TCP_CLOSE)
+            next
+
+        if (!(skaddr in birth)) {
+            delete whoami_p[skaddr]
+            delete whoami_c[skaddr]
+            next
+        }
+
+        delta_us = (time - birth[skaddr]) * 1000000
+        delete birth[skaddr]
+
+        laddr = $(8+o); sub(/.*=/, "", laddr)
+        lport = $(6+o); sub(/.*=/, "", lport)
+        raddr = $(9+o); sub(/.*=/, "", raddr)
+        rport = $(7+o); sub(/.*=/, "", rport)
+        rx_b = $(14+o); sub(/.*=/, "", rx_b)
+        tx_b = $(15+o); sub(/.*=/, "", tx_b)
+
+        if (opt_time)
+            printf "%-8s ", strftime("%H:%M:%S", time)
+
+        if (opt_timestamp) {
+            if (start_ts == 0)
+                start_ts = time
+            lasted_s = time - start_ts
+            printf "%-12.6f ", lasted_s
+        }
+
+        if (skaddr in whoami_p && skaddr in whoami_c)
+           printf "%-8s %-12s ", whoami_p[skaddr], whoami_c[skaddr]
+        else
+           printf "%-8s %-12s ", pid, comm
+        printf "%-20s %-6s %-20s %-6s %6d %6d %-5s\n",
+               laddr, lport, raddr, rport, tx_b / 1024, rx_b / 1024, delta_us / 1000
+
+        if (!opt_duration)
+            fflush()
+
+        if (skaddr in whoami_p)
+            delete whoami_p[skaddr]
+        if (skaddr in whoami_c)
+            delete whoami_c[skaddr]
+
+        next
+    }
+
+    $0 ~ /LOST.*EVENTS/ { print "WARNING: " $0 > "/dev/stderr" }
+'
+
+### end tracing
+end

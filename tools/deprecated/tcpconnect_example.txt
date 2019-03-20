@@ -1,0 +1,60 @@
+Demonstrations of tcpconnect, the Linux kprobe/ftrace version.
+
+
+This tool traces the kernel function performing active TCP connections
+(eg, via a connect() syscall; accept() are passive connections). Some example
+output (IP addresses changed to protect the innocent):
+
+# ./tcpconnect
+Tracing tcpconnect. Hit Ctrl-C to end
+PID      COMM         SADDR                SPORT  DADDR                DPORT
+3679     curl         192.168.60.173       48948  220.181.111.188      80
+3683     curl         192.168.60.173       56770  220.181.112.244      80
+3753     wrk          192.168.60.173       56772  220.181.112.244      80
+3749     nginx        192.168.60.173       48954  220.181.111.188      80
+
+This output shows four connections, one from a "wrk" process, two from
+"curl", and one from "nginx". The output details shows the IP version, source
+address, source port, destination address, and destination port. This traces
+attempted connections: these may have failed.
+
+The overhead of this tool should be negligible, since it is only tracing the
+kernel functions performing connect. It is not tracing every packet and then
+filtering.
+
+
+The -t option prints a timestamp column:
+
+# ./tcpconnect -t
+Tracing tcpconnect. Hit Ctrl-C to end
+TIME(s)      PID      COMM         SADDR                SPORT  DADDR                DPORT
+62.892136    3808     wrk          192.168.60.173       49012  220.181.111.188      80
+62.918198    3804     wrk          192.168.60.173       56834  220.181.112.244      80
+62.943093    3807     wrk          192.168.60.173       49016  220.181.111.188      80
+91.723584    3807     wrk          192.168.60.173       56882  220.181.112.244      80
+91.749349    3809     wrk          192.168.60.173       49064  220.181.111.188      80
+91.776038    3807     wrk          192.168.60.173       56886  220.181.112.244      80
+
+The output shows some periodic connections (or attempts) from a "wrk"
+process to various other addresses. A few connections occur every minute.
+
+
+USAGE message:
+
+# ./tcpconnect -h
+usage: tcpconnect [-h] [-t] [-p PID] [-P PORT]
+
+Trace TCP connects
+
+optional arguments:
+  -h    show this help message and exit
+  -t    include timestamp on output
+  -p    trace this PID only
+  -P    comma-separated list of destination ports to trace.
+
+examples:
+    ./tcpconnect           # trace all TCP connect()s
+    ./tcpconnect -t        # include timestamps
+    ./tcpconnect -p 181    # only trace PID 181
+    ./tcpconnect -P 80     # only trace port 80
+    ./tcpconnect -P 80,81  # only trace port 80 and 81
