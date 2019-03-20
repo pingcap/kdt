@@ -1,6 +1,6 @@
-# Kernel debug toolkit (Kdt)
+# Kernel debug toolkit (KDT)
 
-Kdt is a toolkit for efficient kernel tracing and hotfix. It makes use of
+KDT is a toolkit for efficient kernel tracing and hotfix. It makes use of
 extended BPF (Berkeley Packet Filters), formally known as eBPF, a new feature
 that was first added to Linux 3.15. Much of what BCC uses requires Linux 4.1 and
 above. Fortunately RHEL/CENTOS 7.6 has already supported a plenty of eBPF
@@ -35,7 +35,7 @@ We use [bcc](https://github.com/iovisor/bcc) to increase development efficiency,
 so for the changes of the bcc's framework code, we will submit them to it's
 repo directly.
 
-Kdt also uses [kpatch](https://github.com/dynup/kpatch) to hotfix a running
+KDT also uses [kpatch](https://github.com/dynup/kpatch) to hotfix a running
 kernel without rebooting or restarting any processes. It's relatively easy to
 use than RHEL's livepatch, it's an automatic patches generation and has less
 limitations. One limitation we know is that sometimes it maybe failed to patch a
