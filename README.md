@@ -1,4 +1,4 @@
-# Kernel debug toolkit (KDT)
+# Kernel Debug Toolkit (KDT)
 
 KDT is a toolkit for efficient kernel tracing and hotfix. It makes use of
 extended BPF (Berkeley Packet Filters), formally known as eBPF, a new feature
